@@ -96,6 +96,46 @@ impl BinaryCopyInWriter {
         Ok(())
     }
 
+    /// Flush the sink
+    pub async fn flush(self: Pin<&mut Self>) -> Result<(), Error> {
+        let mut this = self.project();
+        if this.buf.len() > 4096 {
+            this.sink.send(this.buf.split().freeze()).await?;
+        }
+        Ok(())
+    }
+
+    /// Write a single row
+    pub fn write_values(self: Pin<&mut Self>, values: &Vec<Box<dyn ToSql>>) -> Result<(), Error> {
+        let this = self.project();
+
+        let values = values.into_iter();
+        assert!(
+            values.len() == this.types.len(),
+            "expected {} values but got {}",
+            this.types.len(),
+            values.len(),
+        );
+
+        this.buf.put_i16(this.types.len() as i16);
+
+        for (i, (value, type_)) in values.zip(this.types).enumerate() {
+            let idx = this.buf.len();
+            this.buf.put_i32(0);
+            let len = match value
+                .to_sql_checked(type_, this.buf)
+                .map_err(|e| Error::to_sql(e, i))?
+            {
+                IsNull::Yes => -1,
+                IsNull::No => i32::try_from(this.buf.len() - idx - 4)
+                    .map_err(|e| Error::encode(io::Error::new(io::ErrorKind::InvalidInput, e)))?,
+            };
+            BigEndian::write_i32(&mut this.buf[idx..], len);
+        }
+
+        Ok(())
+    }
+
     /// Completes the copy, returning the number of rows added.
     ///
     /// This method *must* be used to complete the copy process. If it is not, the copy will be aborted.
